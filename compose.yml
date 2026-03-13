@@ -1,0 +1,42 @@
+services: 
+  # Servicio de Ollama (LLM)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: pdi-ollama
+    volumes:
+      # Volumen para guardar los modelos descargados
+      - ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - pdi-network
+    restart: unless-stopped
+
+  # Servicio de tu API FastAPI
+  pdi-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdi-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Variable para que tu app se conecte a Ollama por nombre de servicio
+      - OLLAMA_HOST=http://ollama:11434
+    volumes:
+      # Montar carpetas de imágenes para que persistan
+      - ./imagenes_decodificadas_base64:/app/imagenes_decodificadas_base64
+      - ./imagenes_ingresadas_como_archivo_upload:/app/imagenes_ingresadas_como_archivo_upload
+    depends_on:
+      - ollama
+    networks:
+      - pdi-network
+    restart: unless-stopped
+
+networks:
+  pdi-network:
+    driver: bridge
+
+volumes:
+  ollama-data:
+    driver: local
