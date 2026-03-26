@@ -49,6 +49,8 @@ class TicketMetadata(BaseModel):
     hora: Optional[str] = Field(None, description="Hora de emisión")
     referencia: Optional[str] = Field(None, description="Número de referencia/folio")
     autorizacion: Optional[str] = Field(None, description="Código de autorización")
+    serie: Optional[str] = Field(None, description="Serie del documento FEL")
+    dte: Optional[str] = Field(None, description="Número de autorización DTE")
     
 class TicketInvoiceInfo(BaseModel):
     """Información de facturación"""
@@ -76,6 +78,9 @@ class TicketStructured(BaseModel):
     # OCR raw
     texto_completo: str = Field("", description="Texto OCR completo")
     confianza_promedio: float = Field(0.0, description="Confianza promedio del OCR")
+
+    #rfc: Optional[str] = Field(None, description="RFC del establecimiento")
+    nit: Optional[str] = Field(None, description="NIT del establecimiento (Guatemala)")
 
 class TicketProcessResponse(BaseModel):
     """Respuesta del endpoint de procesamiento"""

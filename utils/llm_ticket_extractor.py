@@ -21,7 +21,7 @@ class LLMTicketExtractor:
     - Campo llm_ok para facilitar debug
     """
 
-    def __init__(self, model: str = "qwen2.5:3b"):
+    def __init__(self, model: str = "qwen2.5:7b"):
         self.model = model
         ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
         os.environ["OLLAMA_HOST"] = ollama_host
@@ -48,22 +48,28 @@ class LLMTicketExtractor:
 
     def _create_system_prompt(self) -> str:
         return (
-            "Eres un analizador de tickets de caja. "
-            "Extrae datos y responde SOLO con JSON válido, "
-            "sin texto extra, sin markdown, sin explicaciones.\n\n"
-            "REGLAS ESTRICTAS:\n"
-            '1. "establecimiento": Nombre del negocio. Solo las primeras 2-3 líneas. '
-            "Máximo 40 caracteres. Si no estás seguro: null.\n"
-            '2. "fecha": Fecha en formato DD/MM/YYYY. '
-            'Si dice "11-Apr-2023" → "11/04/2023". Si no hay fecha: null.\n'
-            '3. "subtotal": Número float. Importe antes de impuestos. Si no existe: 0.00.\n'
-            '4. "iva": Número float. Impuesto (IVA, TAX, GRAV, BASE IMPONIBLE). Si no existe: 0.00.\n'
-            '5. "total": Número float. Importe total final. OBLIGATORIO.\n'
-            '6. "propina": Número float. Propina o servicio. Si no existe: 0.00.\n'
-            '7. "factura_url": URL del portal de facturación. Si no existe: null.\n\n'
-            "RESPUESTA (exactamente este formato, una sola línea):\n"
-            '{"establecimiento":"...","fecha":"DD/MM/YYYY","subtotal":0.00,'
-            '"iva":0.00,"total":0.00,"propina":0.00,"factura_url":null}'
+            "Eres un analizador de tickets de caja guatemaltecos (sistema FEL).\n"
+            "Extrae datos y responde SOLO con JSON válido, sin texto extra.\n\n"
+            "REGLAS:\n"
+            '1. "nit": NIT del EMISOR (establecimiento). '
+            "Está en el encabezado, ANTES de la sección FACTURA. "
+            "Formato: dígitos con guión al final (ej: 3535591-3). "
+            "IGNORA el NIT del certificador y del comprador.\n"
+            '2. "serie": Código alfanumérico corto después de \"serie:\". '
+            "Ej: E9628AD9. Solo el primer segmento antes de guión.\n"
+            '3. "dte": Número después de \"Numero de DTE:\" o \"DTE:\". '
+            "Solo dígitos, 7-12 caracteres. Ej: 49498949.\n"
+            '4. "establecimiento": Solo primeras 2-3 líneas. Máx 40 chars.\n'
+            '5. "fecha": Formato DD/MM/YYYY.\n'
+            '6. "total": Float. Total final.\n'
+            '7. "subtotal": Float. Antes de impuestos. Si no existe: 0.00.\n'
+            '8. "iva": Float. Si no existe: 0.00.\n'
+            '9. "propina": Float. Si no existe: 0.00.\n'
+            '10. "factura_url": URL o null.\n\n'
+            "RESPUESTA (JSON en una sola línea):\n"
+            '{"establecimiento":null,"fecha":null,"subtotal":0.00,'
+            '"iva":0.00,"total":0.00,"propina":0.00,"factura_url":null,'
+            '"nit":null,"serie":null,"dte":null}'
         )
 
     # ------------------------------------------------------------------
@@ -184,14 +190,16 @@ class LLMTicketExtractor:
     # ------------------------------------------------------------------
 
     def _find_values_via_regex(self, text: str) -> Dict:
-        """
-        Busca montos en el texto OCR con patrones expandidos.
-        Soporta: VALOR TOTAL, BASE IMPONIBLE IVA, IVA independiente, etc.
-        Evita capturar códigos de barras u otros números grandes sin formato.
-        """
-        candidates = {"total": 0.0, "subtotal": 0.0, "iva": 0.0, "url": None}
+        candidates = {
+            "total": 0.0,
+            "subtotal": 0.0,
+            "iva": 0.0,
+            "url": None,
+            "nit": None,
+            "serie": None,
+            "dte": None
+        }
 
-        # Patrón de número: entero o decimal con separadores opcionales
         _num = r"\$?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?"
 
         total_pattern = re.compile(
@@ -215,7 +223,6 @@ class LLMTicketExtractor:
                 val = self._parse_money(mount_str)
                 if val <= 0:
                     continue
-                # Filtro: enteros muy grandes sin formato suelen ser códigos de barras
                 if val > 50_000 and "," not in mount_str and "." not in mount_str:
                     continue
                 bucket.append(val)
@@ -229,7 +236,6 @@ class LLMTicketExtractor:
 
         if found_subtotals:
             candidates["subtotal"] = max(found_subtotals)
-            # Corrección lógica: subtotal no puede ser mayor que el total
             if candidates["total"] > 0 and candidates["subtotal"] > candidates["total"] * 1.05:
                 valid_subs = [x for x in found_subtotals if x <= candidates["total"]]
                 candidates["subtotal"] = max(valid_subs) if valid_subs else 0.0
@@ -237,13 +243,72 @@ class LLMTicketExtractor:
         if found_iva:
             candidates["iva"] = max(found_iva)
 
-        # Búsqueda de URL de facturación
+        # Fallback total: si sigue en 0, tomar el mayor monto decimal del texto
+        if candidates["total"] == 0.0:
+            # Excluir números entre paréntesis (suelen ser precios unitarios)
+            text_clean = re.sub(r'\([^)]*\)', '', text)
+            all_amounts = re.findall(r'\b(\d{1,4}[.,]\d{2})\b', text_clean)
+            parsed_amounts = [
+                self._parse_money(a) for a in all_amounts
+                if 0 < self._parse_money(a) <= 10_000
+            ]
+            if parsed_amounts:
+                candidates["total"] = max(parsed_amounts)
+
+        # URL
         text_nospaces = text.replace(" ", "")
         url_match = re.search(
             r"(https?://[\w\.-]+(?:/[\w\.-]*)*)", text_nospaces, re.IGNORECASE
         )
         if url_match:
             candidates["url"] = url_match.group(1)
+
+        # ── NIT ──────────────────────────────────────────────────────────────
+        # Tomar el NIT del encabezado (antes de la sección FACTURA/DATOS DEL)
+        pre_factura = re.split(r'(?i)(FACTURA|DATOS DEL)', text)[0]
+        nit_match = re.search(
+            r'(?i)NIT\s*[:\.-]?\s*([0-9]{1,10}-?[0-9Kk])',
+            pre_factura
+        )
+        if nit_match:
+            candidates["nit"] = nit_match.group(1).strip()
+        else:
+            # Fallback: OCR puede confundir N con H o K
+            nit_fallback = re.search(
+                r'(?i)[HKN][I1][T]\s*[:\.-]?\s*([0-9]{1,10}-?[0-9Kk])',
+                text
+            )
+            if nit_fallback:
+                candidates["nit"] = nit_fallback.group(1).strip()
+
+        # ── SERIE ─────────────────────────────────────────────────────────────
+        serie_match = re.search(
+            r'(?i)serie\s*[:\.-]?\s*([A-Za-z0-9]{6,20})',
+            text
+        )
+        if serie_match:
+            candidates["serie"] = serie_match.group(1).upper().strip()
+
+        # ── DTE ───────────────────────────────────────────────────────────────
+        # Normalizar: el OCR puede partir "DTE:\n:49498949" en dos líneas
+        text_normalized = re.sub(
+            r'(?i)(D[T1I][E3]\s*[:\.-]*)\s*\n\s*[:\.-]*\s*([0-9]{6,12})',
+            r'\1\2',
+            text
+        )
+        dte_match = re.search(
+            r'(?i)(?:numero\s+de\s+)?D[T1I][E3]\s*[:\.-]*\s*([0-9]{6,12})',
+            text_normalized
+        )
+        if dte_match:
+            candidates["dte"] = dte_match.group(1).strip()
+        else:
+            dte_context = re.search(
+                r'(?i)(?:autorizaci[oó]n|folio|numero)\s*[:\.-]*\s*([0-9]{7,12})',
+                text_normalized
+            )
+            if dte_context:
+                candidates["dte"] = dte_context.group(1).strip()
 
         return candidates
 
@@ -335,7 +400,7 @@ class LLMTicketExtractor:
             data["propina"]  = self._fix_missing_decimal(data["propina"],  data["total"])
 
         # 5. URL: Regex tiene prioridad
-        data["factura_url"] = regex_data["url"] or llm_data.get("factura_url")
+        data["factura_url"] = regex_data.get("url") or llm_data.get("factura_url")
 
         # 6. Establecimiento: lógica multicapa
         data["establecimiento"] = self._extract_establecimiento(clean_text, llm_data)
@@ -349,6 +414,11 @@ class LLMTicketExtractor:
             fecha = date_match.group(1) if date_match else ""
         data["fecha"] = fecha
 
+        # 8. Campos específicos de Guatemala (FEL)
+        data["nit"] = regex_data.get("nit") or llm_data.get("nit")
+        data["serie"] = regex_data.get("serie") or llm_data.get("serie")
+        data["dte"] = regex_data.get("dte") or llm_data.get("dte")
+
         # Metadatos de respuesta
         data["success"]   = True
         data["llm_ok"]    = llm_ok   # útil para debug: indica si el LLM respondió bien
@@ -361,6 +431,6 @@ class LLMTicketExtractor:
 # Función helper (API pública del módulo)
 # ------------------------------------------------------------------
 
-def extract_with_ollama(ocr_text: str, model: str = "qwen2.5:3b") -> Dict:
+def extract_with_ollama(ocr_text: str, model: str = "qwen2.5:7b") -> Dict:
     extractor = LLMTicketExtractor(model=model)
     return extractor.extract_ticket_fields(ocr_text)

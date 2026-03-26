@@ -20,41 +20,40 @@ def convert_to_native_types(obj):
 
 ### EXTRACCION DE TEXTOS ###
 def extract_text_from_image(image_path: str, min_confidence: float = 0.2) -> Dict:
-    
     try:
-        results = reader.readtext(image_path, 
-            # Mejora de contraste #
-            contrast_ths=0.2,        
-            adjust_contrast=0.5,     
-            
-            # Filtrado para mejorar el procesamiento #
-            text_threshold=0.5,      
-            low_text=0.3,           
-            link_threshold=0.4,      
-            canvas_size=1920,        
-            mag_ratio=1.75            
+        results = reader.readtext(
+            image_path,
+            contrast_ths=0.2,
+            adjust_contrast=0.5,
+            text_threshold=0.5,
+            low_text=0.3,
+            link_threshold=0.4,
+            canvas_size=1920,
+            mag_ratio=1.75
         )
-        
+
+        # Ordenar por posición vertical (coordenada Y del bbox)
+        results_sorted = sorted(results, key=lambda r: r[0][0][1])
+
         lines = []
-        for (bbox, text, prob) in results:
-            if float(prob) >= min_confidence: 
+        for (bbox, text, prob) in results_sorted:
+            if float(prob) >= min_confidence:
                 lines.append({
                     "text": str(text),
                     "confidence": float(prob),
                     "bbox": convert_to_native_types(bbox)
                 })
-        
-        # Solo texto con confianza suficiente
-        text_full = " ".join([line["text"] for line in lines])
-        
+
+        # Unir con saltos de línea para preservar estructura vertical
+        text_full = "\n".join([line["text"] for line in lines])
+
         return {
             "success": True,
             "text_full": text_full,
             "lines": lines,
             "total_lines": len(lines),
-            "filtered_count": len(results) - len(lines)  # Cuántos se filtraron
+            "filtered_count": len(results) - len(lines)
         }
-        
     except Exception as e:
         return {
             "success": False,
